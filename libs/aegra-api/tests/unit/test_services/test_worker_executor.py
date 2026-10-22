@@ -1120,6 +1120,28 @@ class TestExecuteAndRelease:
         assert RUN_ID in explicit_run_cancellations
         assert not semaphore.locked()
 
+    @pytest.mark.asyncio
+    async def test_cleanup_clears_the_cancel_flag_when_someone_else_removed_the_entry(
+        self: "TestExecuteAndRelease",
+    ) -> None:
+        """Regression: a thread delete popping the entry mid-unwind left the cancel flag set forever."""
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+
+        async def entry_removed_elsewhere(rid: str, wn: str, claim: _ClaimSlot) -> None:
+            explicit_run_cancellations.add(rid)
+            active_runs.pop(rid, None)
+
+        executor._execute_with_lease = AsyncMock(side_effect=entry_removed_elsewhere)  # type: ignore[method-assign]
+        with patch(f"{MODULE}.settings") as mock_settings:
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
+            await executor._execute_and_release(RUN_ID, "worker-0", semaphore)
+
+        assert RUN_ID not in explicit_run_cancellations
+        assert RUN_ID not in active_runs
+        assert not semaphore.locked()
+
 
 class TestExecuteWithLease:
     @pytest.mark.asyncio

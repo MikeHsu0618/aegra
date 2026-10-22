@@ -345,8 +345,9 @@ class WorkerExecutor(BaseExecutor):
         finally:
             _timeout_cancellations.discard(run_id)
             _shutdown_cancellations.discard(run_id)
-            # A newer attempt of this run may have registered here meanwhile; its entry is not ours.
-            if active_runs.get(run_id) is current_task:
+            # A newer attempt of this run may have registered here meanwhile; its entry and flag are not ours.
+            registered = active_runs.get(run_id)
+            if registered is None or registered is current_task:
                 explicit_run_cancellations.discard(run_id)
                 active_runs.pop(run_id, None)
             semaphore.release()
