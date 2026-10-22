@@ -487,13 +487,13 @@ class TestStartStop:
 
 class TestSweepOneBatch:
     @pytest.mark.asyncio
-    async def test_marks_orphan_error_and_reconciles_its_thread(self) -> None:
+    async def test_marks_orphan_error_and_reconciles_its_thread(self: "TestSweepOneBatch") -> None:
         session = AsyncMock()
         locked = MagicMock()
         locked.fetchall.return_value = [("run-1", "thread-1", "user-1")]
         updated = MagicMock()
         updated.scalar_one_or_none.return_value = "run-1"
-        session.execute = AsyncMock(side_effect=[locked, updated])
+        session.execute = AsyncMock(side_effect=[locked, updated, MagicMock(), MagicMock()])
         session.commit = AsyncMock()
         maker = _make_session_maker(session)
 
@@ -513,7 +513,40 @@ class TestSweepOneBatch:
         session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_selects_only_running_rows_that_never_held_a_lease(self) -> None:
+    async def test_locks_swept_threads_in_order_under_a_lock_timeout_before_reconciling(
+        self: "TestSweepOneBatch",
+    ) -> None:
+        session = AsyncMock()
+        locked = MagicMock()
+        locked.fetchall.return_value = [("run-1", "thread-b", "user-1"), ("run-2", "thread-a", "user-2")]
+        updated = [MagicMock(), MagicMock()]
+        updated[0].scalar_one_or_none.return_value = "run-1"
+        updated[1].scalar_one_or_none.return_value = "run-2"
+        session.execute = AsyncMock(side_effect=[locked, *updated, MagicMock(), MagicMock()])
+        session.commit = AsyncMock()
+        maker = _make_session_maker(session)
+
+        with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+            patch(
+                "aegra_api.services.lease_reaper.set_thread_status_if_no_active_runs",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_settings.worker.ORPHAN_SWEEP_MIN_AGE_SECONDS = 300
+            await LeaseReaper._sweep_one_batch()
+
+        timeout_stmt, lock_stmt = (call.args[0] for call in session.execute.await_args_list[3:5])
+        assert "set_config" in str(timeout_stmt.compile(dialect=postgresql.dialect()))
+        assert "lock_timeout" in timeout_stmt.compile().params.values()
+        compiled_lock = str(lock_stmt.compile(dialect=postgresql.dialect()))
+        assert "ORDER BY thread.thread_id" in compiled_lock
+        assert compiled_lock.endswith("FOR UPDATE")
+        assert ["thread-a", "thread-b"] in lock_stmt.compile().params.values()
+
+    @pytest.mark.asyncio
+    async def test_selects_only_running_rows_that_never_held_a_lease(self: "TestSweepOneBatch") -> None:
         session = AsyncMock()
         locked = MagicMock()
         locked.fetchall.return_value = []
@@ -540,7 +573,7 @@ class TestSweepOneBatch:
         assert "FOR UPDATE SKIP LOCKED" in compiled
 
     @pytest.mark.asyncio
-    async def test_counts_a_row_seen_but_not_swept_when_its_update_loses(self) -> None:
+    async def test_counts_a_row_seen_but_not_swept_when_its_update_loses(self: "TestSweepOneBatch") -> None:
         session = AsyncMock()
         locked = MagicMock()
         locked.fetchall.return_value = [("run-1", "thread-1", "user-1")]
@@ -567,7 +600,7 @@ class TestSweepOneBatch:
 
 class TestSweepLeaselessOrphans:
     @pytest.mark.asyncio
-    async def test_keeps_batching_until_a_batch_sees_nothing(self) -> None:
+    async def test_keeps_batching_until_a_batch_sees_nothing(self: "TestSweepLeaselessOrphans") -> None:
         batches = [(2, ["run-1", "run-2"]), (1, ["run-3"]), (0, [])]
         before = _recovered_count("local_orphan")
 
@@ -584,7 +617,7 @@ class TestSweepLeaselessOrphans:
         assert _recovered_count("local_orphan") == before + 3
 
     @pytest.mark.asyncio
-    async def test_stops_at_the_batch_limit_instead_of_looping_forever(self) -> None:
+    async def test_stops_at_the_batch_limit_instead_of_looping_forever(self: "TestSweepLeaselessOrphans") -> None:
         with (
             patch("aegra_api.services.lease_reaper.settings") as mock_settings,
             patch.object(LeaseReaper, "_sweep_one_batch", new_callable=AsyncMock, return_value=(1, [])) as mock_batch,
@@ -596,7 +629,7 @@ class TestSweepLeaselessOrphans:
         assert mock_batch.await_count == _SWEEP_MAX_BATCHES
 
     @pytest.mark.asyncio
-    async def test_does_not_touch_the_database_when_disabled(self) -> None:
+    async def test_does_not_touch_the_database_when_disabled(self: "TestSweepLeaselessOrphans") -> None:
         with (
             patch("aegra_api.services.lease_reaper.settings") as mock_settings,
             patch.object(LeaseReaper, "_sweep_one_batch", new_callable=AsyncMock) as mock_batch,
@@ -612,7 +645,7 @@ class TestSweepWithLockedRows:
     """SKIP LOCKED returns nothing when every orphan is locked, which is not the same as none left."""
 
     @pytest.mark.asyncio
-    async def test_retries_when_an_empty_batch_still_leaves_orphans(self) -> None:
+    async def test_retries_when_an_empty_batch_still_leaves_orphans(self: "TestSweepWithLockedRows") -> None:
         batches = [(0, []), (1, ["run-1"]), (0, [])]
 
         with (
@@ -629,7 +662,7 @@ class TestSweepWithLockedRows:
         mock_sleep.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_gives_up_with_a_warning_when_orphans_stay_locked(self) -> None:
+    async def test_gives_up_with_a_warning_when_orphans_stay_locked(self: "TestSweepWithLockedRows") -> None:
         with (
             patch("aegra_api.services.lease_reaper.settings") as mock_settings,
             patch.object(LeaseReaper, "_sweep_one_batch", new_callable=AsyncMock, return_value=(0, [])) as mock_batch,
@@ -648,7 +681,7 @@ class TestSweepWithLockedRows:
         )
 
     @pytest.mark.asyncio
-    async def test_stops_without_retrying_when_nothing_is_left(self) -> None:
+    async def test_stops_without_retrying_when_nothing_is_left(self: "TestSweepWithLockedRows") -> None:
         with (
             patch("aegra_api.services.lease_reaper.settings") as mock_settings,
             patch.object(LeaseReaper, "_sweep_one_batch", new_callable=AsyncMock, return_value=(0, [])) as mock_batch,

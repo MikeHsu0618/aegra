@@ -16,8 +16,10 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from redis import RedisError
 from sqlalchemy import ColumnElement, Interval, func, literal, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.orm import Run as RunORM
+from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
@@ -33,6 +35,8 @@ _MAX_LOGGED_RUN_IDS = 20
 # An empty SKIP LOCKED batch can mean "all locked", not "none left".
 _SWEEP_LOCK_RETRIES = 3
 _SWEEP_LOCK_RETRY_DELAY_SECONDS = 1.0
+# Startup awaits the sweep; a thread row held elsewhere must fail it rather than stall the instance.
+_SWEEP_LOCK_TIMEOUT = "5s"
 
 
 class LeaseReaper:
@@ -230,6 +234,8 @@ class LeaseReaper:
                 swept.append(run_id)
                 threads_by_user.setdefault(user_id, set()).add(thread_id)
 
+            if threads_by_user:
+                await LeaseReaper._lock_threads(session, set().union(*threads_by_user.values()))
             for user_id, thread_ids in threads_by_user.items():
                 await set_thread_status_if_no_active_runs(
                     session,
@@ -240,6 +246,20 @@ class LeaseReaper:
             await session.commit()
 
         return len(rows), swept
+
+    @staticmethod
+    async def _lock_threads(session: AsyncSession, thread_ids: set[str]) -> None:
+        """Serialize the active-run check with concurrent sweeps and run creation on the same threads.
+
+        The check that follows runs on a fresh snapshot; sorting keeps two sweeps from deadlocking.
+        """
+        await session.execute(select(func.set_config("lock_timeout", _SWEEP_LOCK_TIMEOUT, True)))
+        await session.execute(
+            select(ThreadORM.thread_id)
+            .where(ThreadORM.thread_id.in_(sorted(thread_ids)))
+            .order_by(ThreadORM.thread_id)
+            .with_for_update()
+        )
 
     @staticmethod
     async def _recover_crashed_runs(run_ids: list[str]) -> tuple[list[str], list[str]]:

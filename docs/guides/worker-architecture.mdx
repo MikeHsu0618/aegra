@@ -235,6 +235,7 @@ Each instance therefore sweeps once at startup, in broker mode only, marking suc
 Only rows idle longer than `ORPHAN_SWEEP_MIN_AGE_SECONDS` (default 300) are touched, and `ORPHAN_SWEEP_ENABLED=false` disables the sweep; both assume every replica agrees on `REDIS_BROKER_ENABLED`.
 The sweep fails these runs rather than re-enqueueing them, since an orphan may be old enough that replaying its side effects would surprise callers.
 Rows another transaction holds locked are retried a few times before the sweep gives up and logs how many remain.
+Each batch locks the threads it reconciles before checking them for active runs, so two instances sweeping at once, or a run being created on the same thread, cannot leave the thread `busy` or mark it `error` under a new run. If a thread row stays locked for more than 5 seconds, the sweep fails, startup continues, and the next startup retries.
 
 ## Graceful shutdown
 
