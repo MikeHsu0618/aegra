@@ -168,7 +168,7 @@ class TestWaitForRunExceptionPaths:
         assert result["__error__"]["error"] == "TimeoutError"
 
     @pytest.mark.asyncio
-    async def test_wait_for_run_waits_when_dispatch_fails_after_commit(self) -> None:
+    async def test_wait_for_run_waits_when_dispatch_fails_after_commit(self: "TestWaitForRunExceptionPaths") -> None:
         """The committed run is dispatched later by the reaper; the wait covers that delay."""
         thread_id = "test-thread-123"
         run_id = str(uuid4())

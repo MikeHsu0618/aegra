@@ -373,7 +373,7 @@ class TestFireCron:
         mock_delete.assert_awaited_once_with("eph-thread-fail", cron.user_id)
 
     @pytest.mark.asyncio
-    async def test_dispatch_failure_after_the_run_is_saved_still_advances_the_schedule(self) -> None:
+    async def test_dispatch_failure_after_the_run_is_saved_still_advances_the_schedule(self: "TestFireCron") -> None:
         """Regression: a failed queue push surfaced as a setup failure, so the claim was
         released and the next tick fired a second run while the reaper ran the first."""
         scheduler = CronScheduler()
