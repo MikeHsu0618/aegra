@@ -345,8 +345,10 @@ class WorkerExecutor(BaseExecutor):
         finally:
             _timeout_cancellations.discard(run_id)
             _shutdown_cancellations.discard(run_id)
-            explicit_run_cancellations.discard(run_id)
-            active_runs.pop(run_id, None)
+            # A newer attempt of this run may have registered here meanwhile; its entry is not ours.
+            if active_runs.get(run_id) is current_task:
+                explicit_run_cancellations.discard(run_id)
+                active_runs.pop(run_id, None)
             semaphore.release()
 
     # ------------------------------------------------------------------
@@ -383,6 +385,10 @@ class WorkerExecutor(BaseExecutor):
         if loaded is None:
             claim.claim_id = None
             logger.debug("Lease not acquired or job missing, skipping", run_id=run_id, worker=worker_name)
+            return
+        if asyncio.get_running_loop().time() >= lease_requested_at + settings.worker.LEASE_DURATION_SECONDS:
+            # The reaper may already be re-dispatching the run; it recovers this row once the lease lapses.
+            logger.warning("Lease ran out while it was being acquired, not starting the run", run_id=run_id)
             return
 
         _restore_trace_context(run_id, loaded.job, loaded.trace)
@@ -674,7 +680,8 @@ async def _heartbeat_loop(
     expires_at = (leased_at if leased_at is not None else loop.time()) + duration
 
     while True:
-        await asyncio.sleep(interval)
+        # Wake while a full interval of lease is still left for the renewal to land in.
+        await asyncio.sleep(min(interval, max(0.0, expires_at - loop.time() - interval)))
         sent_at = loop.time()
         budget = expires_at - sent_at
         if budget <= 0:

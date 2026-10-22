@@ -142,7 +142,10 @@ async def execute_run(job: RunJob, *, claim_id: str | None = None) -> None:
         _lease_loss_cancellations.discard(run_id)
         _shutdown_cancellations.discard(run_id)
         _timeout_cancellations.discard(run_id)
-        active_runs.pop(run_id, None)
+        # Worker mode registers the supervising task, which removes its own entry; a reaped
+        # attempt unwinding late must not drop the one a newer attempt registered.
+        if active_runs.get(run_id) is asyncio.current_task():
+            active_runs.pop(run_id, None)
         if not resumes_elsewhere and await _owns_teardown(run_id, user_id, claim_id, finalized=finalized):
             await streaming_service.cleanup_run(run_id)
             await _signal_run_done(run_id)

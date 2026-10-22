@@ -268,7 +268,7 @@ class TestHeartbeatFencing:
     """The heartbeat must stop the graph before its lease can be handed to another attempt (#502)."""
 
     @pytest.fixture(autouse=True)
-    def _clear_lease_loss(self) -> Iterator[None]:
+    def _clear_lease_loss(self: "TestHeartbeatFencing") -> Iterator[None]:
         _lease_loss_cancellations.clear()
         yield
         _lease_loss_cancellations.clear()
@@ -283,6 +283,7 @@ class TestHeartbeatFencing:
         *,
         interval: float,
         duration: float,
+        leased_ago: float = 0.0,
     ) -> tuple[asyncio.Task[None], float]:
         job_task = asyncio.create_task(self._idle_job())
         loop = asyncio.get_running_loop()
@@ -294,7 +295,7 @@ class TestHeartbeatFencing:
             mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = interval
             mock_settings.worker.LEASE_DURATION_SECONDS = duration
             await asyncio.wait_for(
-                _heartbeat_loop(RUN_ID, CLAIM_ID, job_task=job_task, leased_at=started),
+                _heartbeat_loop(RUN_ID, CLAIM_ID, job_task=job_task, leased_at=started - leased_ago),
                 timeout=5,
             )
         elapsed = loop.time() - started
@@ -302,7 +303,7 @@ class TestHeartbeatFencing:
         return job_task, elapsed
 
     @pytest.mark.asyncio
-    async def test_abandons_by_the_deadline_even_when_the_renewal_will_not_unwind(self) -> None:
+    async def test_abandons_by_the_deadline_even_when_the_renewal_will_not_unwind(self: "TestHeartbeatFencing") -> None:
         """Regression: wait_for waited for the cancelled renewal to unwind, so
         the graph kept running past the lease while the reaper re-dispatched it."""
 
@@ -322,7 +323,7 @@ class TestHeartbeatFencing:
         assert elapsed < 0.6
 
     @pytest.mark.asyncio
-    async def test_next_deadline_is_measured_from_before_the_renewal_was_sent(self) -> None:
+    async def test_next_deadline_is_measured_from_before_the_renewal_was_sent(self: "TestHeartbeatFencing") -> None:
         calls = 0
 
         async def slow_then_stuck(run_id: str, claim_id: str) -> int:
@@ -342,14 +343,14 @@ class TestHeartbeatFencing:
         assert elapsed < 0.8
 
     @pytest.mark.asyncio
-    async def test_abandons_when_the_claim_was_handed_to_another_attempt(self) -> None:
+    async def test_abandons_when_the_claim_was_handed_to_another_attempt(self: "TestHeartbeatFencing") -> None:
         job_task, _ = await self._run_heartbeat(AsyncMock(return_value=0), interval=0.01, duration=1)
 
         assert job_task.cancelled()
         assert RUN_ID in _lease_loss_cancellations
 
     @pytest.mark.asyncio
-    async def test_abandons_when_renewal_keeps_failing_until_the_lease_runs_out(self) -> None:
+    async def test_abandons_when_renewal_keeps_failing_until_the_lease_runs_out(self: "TestHeartbeatFencing") -> None:
         renew = AsyncMock(side_effect=OSError("database unreachable"))
 
         job_task, elapsed = await self._run_heartbeat(renew, interval=0.05, duration=0.3)
@@ -359,7 +360,7 @@ class TestHeartbeatFencing:
         assert elapsed < 0.6
 
     @pytest.mark.asyncio
-    async def test_keeps_running_while_renewals_succeed(self) -> None:
+    async def test_keeps_running_while_renewals_succeed(self: "TestHeartbeatFencing") -> None:
         renew = AsyncMock(return_value=1)
         job_task = asyncio.create_task(self._idle_job())
         with (
@@ -379,10 +380,49 @@ class TestHeartbeatFencing:
         job_task.cancel()
         await asyncio.gather(job_task, return_exceptions=True)
 
+    @pytest.mark.asyncio
+    async def test_abandons_by_the_deadline_when_acquisition_used_up_most_of_the_lease(
+        self: "TestHeartbeatFencing",
+    ) -> None:
+        """Regression: the first wake-up came a full interval after the graph started,
+        past a lease that a slow acquisition had nearly used up."""
+
+        async def stuck_renewal(run_id: str, claim_id: str) -> int:
+            await asyncio.Event().wait()
+            return 1
+
+        job_task, elapsed = await self._run_heartbeat(stuck_renewal, interval=1.0, duration=2.5, leased_ago=2.4)
+
+        assert job_task.cancelled()
+        assert elapsed < 0.6, "the lease ended ~0.1s in; waiting a 1s interval overran it"
+
+    @pytest.mark.asyncio
+    async def test_renews_at_once_when_less_than_an_interval_of_the_lease_is_left(
+        self: "TestHeartbeatFencing",
+    ) -> None:
+        renew = AsyncMock(return_value=1)
+        job_task = asyncio.create_task(self._idle_job())
+        leased_at = asyncio.get_running_loop().time() - 2.3
+        with (
+            patch(f"{MODULE}._renew_lease", renew),
+            patch(f"{MODULE}.settings") as mock_settings,
+        ):
+            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1.0
+            mock_settings.worker.LEASE_DURATION_SECONDS = 2.5
+            heartbeat = asyncio.create_task(_heartbeat_loop(RUN_ID, CLAIM_ID, job_task=job_task, leased_at=leased_at))
+            await asyncio.sleep(0.3)
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+
+        renew.assert_awaited_with(RUN_ID, CLAIM_ID)
+        assert not job_task.done()
+        job_task.cancel()
+        await asyncio.gather(job_task, return_exceptions=True)
+
 
 class TestClaimIds:
     @pytest.mark.asyncio
-    async def test_each_acquisition_writes_a_fresh_claim_id_instead_of_the_worker_name(self) -> None:
+    async def test_each_acquisition_writes_a_fresh_claim_id_instead_of_the_worker_name(self: "TestClaimIds") -> None:
         session = AsyncMock()
         update_result = MagicMock()
         update_result.rowcount = 1
@@ -402,7 +442,7 @@ class TestClaimIds:
         assert written[1]["claimed_by"] == second.claim_id
 
     @pytest.mark.asyncio
-    async def test_release_only_clears_a_terminal_run_held_by_this_claim(self) -> None:
+    async def test_release_only_clears_a_terminal_run_held_by_this_claim(self: "TestClaimIds") -> None:
         session = AsyncMock()
         maker = _make_session_maker(session)
 
@@ -822,7 +862,7 @@ class TestExecuteAndRelease:
         assert run_id not in _timeout_cancellations
 
     @pytest.mark.asyncio
-    async def test_explicit_cancel_after_claim_reconciles_database(self) -> None:
+    async def test_explicit_cancel_after_claim_reconciles_database(self: "TestExecuteAndRelease") -> None:
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         thread_id = "tttttttt-tttt-tttt-tttt-tttttttttttt"
         semaphore = asyncio.Semaphore(1)
@@ -861,7 +901,9 @@ class TestExecuteAndRelease:
         assert not semaphore.locked()
 
     @pytest.mark.asyncio
-    async def test_explicit_cancel_before_execution_starts_leaves_finalization_to_the_api(self) -> None:
+    async def test_explicit_cancel_before_execution_starts_leaves_finalization_to_the_api(
+        self: "TestExecuteAndRelease",
+    ) -> None:
         """Cancelled before a claim id was minted, so no claim can have committed;
         the API's unowned-run reconciliation owns that row."""
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -883,7 +925,9 @@ class TestExecuteAndRelease:
         assert not semaphore.locked()
 
     @pytest.mark.asyncio
-    async def test_explicit_cancel_during_acquisition_still_finalizes_under_the_claim(self) -> None:
+    async def test_explicit_cancel_during_acquisition_still_finalizes_under_the_claim(
+        self: "TestExecuteAndRelease",
+    ) -> None:
         """Regression: the claim committed before the worker learned its id, so a
         cancel landing in between skipped finalize and the reaper later re-ran the run."""
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -920,7 +964,7 @@ class TestExecuteAndRelease:
         assert not semaphore.locked()
 
     @pytest.mark.asyncio
-    async def test_timeout_before_claim_does_not_finalize(self) -> None:
+    async def test_timeout_before_claim_does_not_finalize(self: "TestExecuteAndRelease") -> None:
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         semaphore = asyncio.Semaphore(1)
         await semaphore.acquire()
@@ -1054,6 +1098,28 @@ class TestExecuteAndRelease:
         assert run_id not in active_runs
         assert not semaphore.locked()
 
+    @pytest.mark.asyncio
+    async def test_cleanup_leaves_a_newer_attempts_registration_alone(self: "TestExecuteAndRelease") -> None:
+        """Regression: a reaped attempt finishing late popped the entry and cancel flag of
+        the attempt that replaced it on this instance, so a cancel could no longer reach it."""
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+        newer_attempt = asyncio.create_task(asyncio.Event().wait())
+
+        async def replaced_while_running(rid: str, wn: str, claim: _ClaimSlot) -> None:
+            active_runs[rid] = newer_attempt
+            explicit_run_cancellations.add(rid)
+
+        executor._execute_with_lease = AsyncMock(side_effect=replaced_while_running)  # type: ignore[method-assign]
+        with patch(f"{MODULE}.settings") as mock_settings:
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
+            await executor._execute_and_release(RUN_ID, "worker-0", semaphore)
+
+        assert active_runs.get(RUN_ID) is newer_attempt
+        assert RUN_ID in explicit_run_cancellations
+        assert not semaphore.locked()
+
 
 class TestExecuteWithLease:
     @pytest.mark.asyncio
@@ -1096,6 +1162,35 @@ class TestExecuteWithLease:
             await task  # Completes normally (CancelledError is handled internally)
 
         assert job_task_was_cancelled, "job_task must be cancelled when _execute_with_lease is cancelled"
+
+    @pytest.mark.asyncio
+    async def test_does_not_start_the_graph_when_the_lease_ran_out_during_acquisition(
+        self: "TestExecuteWithLease",
+    ) -> None:
+        """Regression: a slow claim round-trip handed the graph a lease that had already
+        expired, so it ran while the reaper was free to dispatch the run elsewhere."""
+        loaded = MagicMock(spec=_LoadedRun)
+        loaded.job = _make_run_job()
+        loaded.trace = {}
+        loaded.claim_id = CLAIM_ID
+
+        async def slow_acquire(rid: str, wn: str, *, claim_id: str | None = None) -> _LoadedRun:
+            await asyncio.sleep(0.2)
+            return loaded
+
+        with (
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}._acquire_and_load", side_effect=slow_acquire),
+            patch(f"{MODULE}._restore_trace_context"),
+            patch(f"{MODULE}.execute_run", new_callable=AsyncMock) as mock_execute,
+            patch(f"{MODULE}._heartbeat_loop", new_callable=AsyncMock),
+            patch(f"{MODULE}._release_lease", new_callable=AsyncMock),
+        ):
+            mock_settings.worker.LEASE_DURATION_SECONDS = 0.1
+            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 0.03
+            await WorkerExecutor()._execute_with_lease(RUN_ID, "worker-0", _ClaimSlot())
+
+        mock_execute.assert_not_called()
 
 
 class TestDequeue:

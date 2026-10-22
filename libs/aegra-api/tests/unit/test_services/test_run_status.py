@@ -192,7 +192,7 @@ class TestClaimFencing:
         return session
 
     @pytest.mark.asyncio
-    async def test_finalize_with_claim_predicates_on_it(self) -> None:
+    async def test_finalize_with_claim_predicates_on_it(self: "TestClaimFencing") -> None:
         session = self._session("run-1")
 
         with (
@@ -215,7 +215,7 @@ class TestClaimFencing:
         assert "SET status=" in str(compiled) and "claimed_by=" not in str(compiled).split("WHERE")[0]
 
     @pytest.mark.asyncio
-    async def test_finalize_rejected_for_a_superseded_claim_leaves_the_thread_alone(self) -> None:
+    async def test_finalize_rejected_for_a_superseded_claim_leaves_the_thread_alone(self: "TestClaimFencing") -> None:
         session = self._session(None)
 
         with (
@@ -239,7 +239,7 @@ class TestClaimFencing:
         session.rollback.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_finalize_without_claim_keeps_the_status_only_guard(self) -> None:
+    async def test_finalize_without_claim_keeps_the_status_only_guard(self: "TestClaimFencing") -> None:
         session = self._session("run-1")
 
         with (
@@ -252,7 +252,7 @@ class TestClaimFencing:
         assert "claimed_by" not in where
 
     @pytest.mark.asyncio
-    async def test_start_with_claim_predicates_on_it(self) -> None:
+    async def test_start_with_claim_predicates_on_it(self: "TestClaimFencing") -> None:
         session = self._session(None)
 
         with patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)):
@@ -267,7 +267,7 @@ class TestClaimFencing:
     @pytest.mark.parametrize(
         ("status", "expected"), [("pending", True), ("running", True), ("success", False), (None, False)]
     )
-    async def test_is_run_active(self, status: str | None, expected: bool) -> None:
+    async def test_is_run_active(self: "TestClaimFencing", status: str | None, expected: bool) -> None:
         session = _make_mock_session()
         session.scalar = AsyncMock(return_value=status)
 
