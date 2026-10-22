@@ -643,6 +643,6 @@ class TestActiveRunRegistration:
 
         task = asyncio.create_task(run_registered())
         active_runs["run-1"] = task
-        await task
+        await asyncio.wait_for(task, timeout=5)
 
         assert "run-1" not in active_runs
