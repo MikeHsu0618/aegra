@@ -109,14 +109,14 @@ async def _statuses(maker: async_sessionmaker, thread_id: str, run_id: str) -> t
     return await _run_status(maker, run_id), await _thread_status(maker, thread_id)
 
 
-async def _wait_until_a_backend_waits_on_a_lock(maker: async_sessionmaker) -> None:
+async def _wait_until_blocked_by(maker: async_sessionmaker, holder: AsyncSession) -> None:
+    """Return once some backend is waiting on a lock that ``holder``'s backend holds."""
+    holder_pid = await holder.scalar(text("SELECT pg_backend_pid()"))
     async with maker() as session:
         for _ in range(100):
             waiting = await session.scalar(
-                text(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
-                )
+                text("SELECT count(*) FROM pg_stat_activity WHERE :pid = ANY(pg_blocking_pids(pid))"),
+                {"pid": holder_pid},
             )
             if waiting:
                 return
@@ -241,7 +241,7 @@ async def test_sweep_does_not_fail_a_thread_that_gained_a_pending_run_meanwhile(
             p_maker, p_enabled, p_age = _sweep_patches(maker)
             with p_maker, p_enabled, p_age:
                 sweep = asyncio.create_task(LeaseReaper.sweep_leaseless_orphans())
-                await _wait_until_a_backend_waits_on_a_lock(maker)
+                await _wait_until_blocked_by(maker, creator)
                 await creator.commit()
                 await asyncio.wait_for(sweep, timeout=10)
 
