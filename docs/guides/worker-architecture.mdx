@@ -244,9 +244,13 @@ Every acquisition therefore writes a fresh claim id, `<worker name>:<random hex>
 
 When the reaper recovers a run it clears `claimed_by`, so anything the expired attempt still has in flight matches no row. Lease deadlines and expiry checks use the database clock (`now()`), so clock skew between hosts cannot expire a live lease.
 
-The worker also stops itself. If a renewal is rejected, or cannot be confirmed before the lease it is extending runs out (including while the database is unreachable), the heartbeat cancels the graph without finalizing. A single failed renewal with time left on the lease is retried.
+The worker also stops itself. If a renewal is rejected, or cannot be confirmed before the lease it is extending runs out (including while the database is unreachable), the heartbeat cancels the graph without finalizing. A single failed renewal with time left on the lease is retried. A run whose lease already ran out while it was being acquired is not started; the reaper recovers it.
 
 Fencing covers what Aegra writes to the `runs` and `thread` tables, plus closing the run's stream. It does not cover side effects the graph has already produced: checkpoints, tool calls, and events published while the old attempt is being cancelled. Execution across a failover is therefore at-least-once.
+
+<Note>
+  The guarantee holds only once every worker and reaper runs a version with lease fencing. During a rolling upgrade, workers on the old version still claim runs under their worker name and finalize without a claim predicate, and reapers on the old version compare leases against their host clock, so a stalled old-version worker can still overwrite a run until the rollout completes.
+</Note>
 
 ## Graceful shutdown
 
